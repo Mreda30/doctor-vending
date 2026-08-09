@@ -1380,11 +1380,95 @@ function machinesPDF(){
 }
 
 function delRow(table, id, label){
-  askConfirm(`Delete this ${label}? If it has history, deletion is blocked — deactivate it instead.`, async () => {
+  askConfirm(`Delete this ${label}?`, async () => {
     const r = await sb.from(table).delete().eq('id', id);
-    if (r.error) throw Error(`This ${label} has linked records and can’t be deleted. Mark it inactive instead.`);
+    if (r.error){ forceDeleteModal(table, id, label); return; }
     closeModal(); await refresh(); toast('Deleted', 'ok');
   });
+}
+
+/* ---------------- force delete (record + its history) ---------------- */
+function linkedCounts(table, id){
+  const c = [];
+  if (table === 'products'){
+    const batches = S.c.batches.filter(b => b.product_id === id);
+    const items   = S.c.issue_items.filter(x => x.product_id === id);
+    const titems  = S.c.transfer_items.filter(x => x.product_id === id);
+    const adj     = S.c.adjustments.filter(a => a.product_id === id);
+    const stock   = batches.reduce((n,b)=> n + Math.max(0, +b.qty_remaining), 0);
+    if (stock)         c.push([NUM(stock) + ' pieces currently in stock', 'stock']);
+    if (batches.length) c.push([NUM(batches.length) + ' stock-in batch(es)', 'b']);
+    if (items.length)   c.push([NUM(items.length) + ' stock-out line(s)', 'i']);
+    if (titems.length)  c.push([NUM(titems.length) + ' transfer line(s)', 't']);
+    if (adj.length)     c.push([NUM(adj.length) + ' waste record(s)', 'a']);
+  } else if (table === 'suppliers'){
+    const pur = S.c.purchases.filter(p => p.supplier_id === id);
+    if (pur.length) c.push([NUM(pur.length) + ' stock-in record(s) — these are KEPT, supplier shown as “—”', 'p']);
+  } else if (table === 'employees'){
+    const iss  = S.c.issues.filter(i => i.employee_id === id);
+    const coll = S.c.collections.filter(x => x.employee_id === id);
+    if (iss.length)  c.push([NUM(iss.length) + ' stock-out(s) — stock will be returned to its batches', 'i']);
+    if (coll.length) c.push([NUM(coll.length) + ' collection record(s)', 'c']);
+  } else if (table === 'machines'){
+    const mt = S.c.machine_transfers.filter(t => t.machine_id === id);
+    if (mt.length) c.push([NUM(mt.length) + ' machine transfer record(s)', 'm']);
+  }
+  return c;
+}
+function forceDeleteModal(table, id, label){
+  const items = linkedCounts(table, id);
+  const name = nameOf(table, id);
+  const list = items.length
+    ? '<ul style="margin:0 0 4px 18px;line-height:1.9">' + items.map(x=>`<li>${x[0]}</li>`).join('') + '</ul>'
+    : '<p class="mut">Linked records will be removed.</p>';
+  openModal('Delete “' + esc(name) + '” permanently?', `
+    <div class="mnote">This ${label} is used by existing records, so it can’t be removed on its own.</div>
+    <p style="color:var(--muted);line-height:1.6;margin-bottom:10px">Deleting it permanently will also remove:</p>
+    ${list}
+    <p style="color:var(--red);line-height:1.6;padding:10px 0 6px">Nothing else is touched — your other products and data stay exactly as they are. This can’t be undone, so take a backup first if unsure.</p>
+    <label class="chk" style="padding-bottom:6px"><input type="checkbox" id="fdOk"> Yes, delete it and its history</label>`,
+    { saveLabel:'Delete permanently', danger:true, onSave: async () => {
+      if (!$('fdOk').checked) throw Error('Tick the confirmation box first');
+      await forceDelete(table, id);
+      closeModal(); await refresh(); toast('Deleted permanently', 'ok');
+    }});
+}
+async function forceDelete(table, id){
+  const del = async (t, col, val) => { const r = await sb.from(t).delete().eq(col, val); if (r.error) throw r.error; };
+  if (table === 'products'){
+    await del('adjustments','product_id', id);
+    await del('issue_items','product_id', id);
+    await del('transfer_items','product_id', id);
+    await del('batches','product_id', id);
+  } else if (table === 'suppliers'){
+    // keep the stock-in history, just detach it from the supplier
+    const r = await sb.from('purchases').update({ supplier_id:null }).eq('supplier_id', id);
+    if (r.error) throw r.error;
+  } else if (table === 'employees'){
+    // return any stock they took back to its original batches, then remove their records
+    for (const i of S.c.issues.filter(x => x.employee_id === id)){
+      for (const it of S.c.issue_items.filter(x => x.issue_id === i.id)){
+        for (const a of (it.alloc || [])){
+          const b = rec('batches', a.b); if (!b) continue;
+          const r = await sb.from('batches').update({ qty_remaining: r4(+b.qty_remaining + +a.q) }).eq('id', b.id);
+          if (r.error) throw r.error; b.qty_remaining = +b.qty_remaining + +a.q;
+        }
+      }
+      await del('issues','id', i.id);
+    }
+    await del('collections','employee_id', id);
+    const r2 = await sb.from('transfers').update({ employee_id:null }).eq('employee_id', id);
+    if (r2.error) throw r2.error;
+    const r3 = await sb.from('machine_transfers').update({ employee_id:null }).eq('employee_id', id);
+    if (r3.error) throw r3.error;
+  } else if (table === 'machines'){
+    await del('machine_transfers','machine_id', id);
+  } else if (table === 'categories'){
+    const r = await sb.from('products').update({ category_id:null }).eq('category_id', id);
+    if (r.error) throw r.error;
+  }
+  const r = await sb.from(table).delete().eq('id', id);
+  if (r.error) throw Error('Still blocked: ' + r.error.message);
 }
 </script>
 <script>

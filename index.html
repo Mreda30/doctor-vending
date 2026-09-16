@@ -804,7 +804,7 @@ function pgPurchases(){
     return `<tr><td class="mut">${fmtD(p.date)}</td><td>${esc(p.ref_no||'—')}</td>
       <td>${esc(nameOf('suppliers', p.supplier_id))}</td><td class="mut">${esc(nameOf('locations', p.location_id))}</td>
       <td class="r">${t.items}</td><td class="r bold">${AED(t.cost)}</td>
-      ${rowBtns(viewIB(`viewPurchase('${p.id}')`), delIB(`delPurchase('${p.id}')`))}</tr>`; });
+      ${rowBtns(viewIB(`viewPurchase('${p.id}')`), editIB(`editPurchaseModal('${p.id}')`), delIB(`delPurchase('${p.id}')`))}</tr>`; });
   page('Stock In', addBtn('Receive stock', 'newPurchase()'),
     `<div class="mnote mb">Goods coming in from a <b>supplier</b> into a warehouse. Each line can have its own expiry date — same product across several lines = several expiry dates.</div>` +
     tbl(['Date','Ref','Supplier','To location',['Lines','r'],['Total cost','r'],''], rows,
@@ -853,15 +853,61 @@ function newPurchase(){
 }
 function viewPurchase(id){
   const p = rec('purchases', id), t = purchaseTotals(id);
-  const rows = S.c.batches.filter(b => b.purchase_id === id).map(b => `<tr>
-    <td>${esc(nameOf('products', b.product_id))}</td><td>${fmtD(b.expiry_date)}</td>
+  const rows = S.c.batches.filter(b => b.purchase_id === id).map(b => {
+    const d = b.expiry_date ? daysTo(b.expiry_date) : null;
+    const badge = d===null ? '' : d < 0 ? ' <span class="tag t-bad">expired</span>' : d <= 30 ? ` <span class="tag t-warn">${d}d</span>` : '';
+    return `<tr>
+    <td>${esc(nameOf('products', b.product_id))}</td><td>${fmtD(b.expiry_date)}${badge}</td>
     <td class="r">${NUM(b.qty_received)}</td><td class="r">${NUM(b.qty_remaining)}</td>
-    <td class="r">${AED(b.unit_cost)}</td><td class="r">${AED(b.qty_received*(+b.unit_cost||0))}</td></tr>`).join('');
+    <td class="r">${AED(b.unit_cost)}</td><td class="r">${AED(b.qty_received*(+b.unit_cost||0))}</td>
+    ${rowBtns(editIB(`editBatchModal('${b.id}','${id}')`))}</tr>`; }).join('');
   openModal('Purchase — ' + esc(p.ref_no || fmtD(p.date)), `
     <div class="mnote">${esc(nameOf('suppliers',p.supplier_id))} → ${esc(nameOf('locations',p.location_id))} · ${fmtD(p.date)}${p.notes?'<br>'+esc(p.notes):''}</div>
-    <div class="twrap"><table class="tbl" style="min-width:540px"><thead><tr><th>Product</th><th>Expiry</th><th class="r">Qty</th><th class="r">Left</th><th class="r">Unit cost</th><th class="r">Total</th></tr></thead>
-    <tbody>${rows}</tbody><tbody class="tfoot"><tr><td colspan="5" style="text-align:right">Total</td><td class="r">${AED(t.cost)}</td></tr></tbody></table></div>
+    <div style="margin-bottom:12px"><button type="button" class="btn ghost sm" onclick="editPurchaseModal('${id}')">${ic('edit',14)} Edit details</button>
+      <span class="mut" style="font-size:12.5px;margin-left:8px">Use the pencil on a line to fix its expiry, cost or quantity.</span></div>
+    <div class="twrap"><table class="tbl" style="min-width:600px"><thead><tr><th>Product</th><th>Expiry</th><th class="r">Qty</th><th class="r">Left</th><th class="r">Unit cost</th><th class="r">Total</th><th></th></tr></thead>
+    <tbody>${rows}</tbody><tbody class="tfoot"><tr><td colspan="5" style="text-align:right">Total</td><td class="r">${AED(t.cost)}</td><td></td></tr></tbody></table></div>
     <div style="height:10px"></div>`, { wide:true });
+}
+function editPurchaseModal(id){
+  const p = rec('purchases', id);
+  openModal('Edit stock-in details', `
+    <div class="frow f3">
+      ${F.sel('epSup','Supplier', LISTS.sups(), p.supplier_id)}
+      ${F.inp('epRef','Reference / invoice no.',{val:p.ref_no||''})}
+      ${F.inp('epDate','Date',{type:'date',val:(p.date||'').slice(0,10),req:true})}
+    </div>
+    <div class="mnote">The receiving location can’t be changed here — that’s where the stock physically sits. Use a Transfer if it moved.</div>
+    ${F.area('epNotes','Notes', p.notes||'')}`, { onSave: async () => {
+      const row = { supplier_id:v('epSup')||null, ref_no:v('epRef')||null,
+        date:v('epDate')||p.date, notes:v('epNotes')||null };
+      const r = await sb.from('purchases').update(row).eq('id', id); if (r.error) throw r.error;
+      await refresh(); viewPurchase(id); toast('Stock-in updated', 'ok');
+    }});
+}
+function editBatchModal(bid, backTo){
+  const b = rec('batches', bid), p = rec('products', b.product_id);
+  const used = r4(+b.qty_received - +b.qty_remaining);
+  openModal('Edit line — ' + esc(p ? p.name : ''), `
+    <div class="mnote">${esc(nameOf('locations', b.location_id))} · received <b>${NUM(b.qty_received)}</b> pc · ${NUM(used)} already taken out · <b>${NUM(b.qty_remaining)}</b> left</div>
+    <div class="frow f3">
+      ${F.inp('ebExp','Expiry date',{type:'date',val:(b.expiry_date||'').slice(0,10)})}
+      ${F.inp('ebCost','Cost / pc (AED)',{type:'number',min:0,step:'any',val:b.unit_cost??''})}
+      ${F.inp('ebQty','Qty received (pc)',{type:'number',min:0,step:'any',val:b.qty_received??''})}
+    </div>
+    <div class="mnote">Fixing the expiry date updates this batch everywhere, including the expiry alerts. Stock already taken out keeps the cost recorded at that time.</div>`,
+    { saveLabel:'Save line', onSave: async () => {
+      const newQty = n_('ebQty');
+      if (!(newQty > 0)) throw Error('Quantity must be greater than 0');
+      const newRemaining = r4(newQty - used);
+      if (newRemaining < 0) throw Error(`${NUM(used)} pieces were already taken out — the quantity can’t be less than that`);
+      const row = { expiry_date:v('ebExp')||null, unit_cost:n_('ebCost'),
+        qty_received:newQty, qty_remaining:newRemaining };
+      const r = await sb.from('batches').update(row).eq('id', bid); if (r.error) throw r.error;
+      await refresh();
+      if (backTo) viewPurchase(backTo); else closeModal();
+      toast('Line updated', 'ok');
+    }});
 }
 function delPurchase(id){
   const consumed = S.c.batches.some(b => b.purchase_id === id && +b.qty_remaining < +b.qty_received - 1e-9);

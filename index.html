@@ -298,7 +298,7 @@ svg.chart text{font-family:var(--ui);fill:var(--muted)}
     <nav id="nav" aria-label="Main"></nav>
     <div class="sb-foot">
       <button class="nv" onclick="signOut()" id="soBtn"></button>
-      <div style="font-size:11px;color:var(--faint);padding:8px 10px 0">v1.5 · UAE · AED</div>
+      <div style="font-size:11px;color:var(--faint);padding:8px 10px 0">v1.6 · UAE · AED</div>
     </div>
   </aside>
   <div id="scrim" onclick="closeDrawer()"></div>
@@ -1103,20 +1103,66 @@ function delColl(id){
 
 /* ---------------- transfers ---------------- */
 function transferTotals(id){
-  let items = 0, qty = 0;
-  for (const t of S.c.transfer_items){ if (t.transfer_id !== id) continue; items++; qty += +t.qty; }
-  return { items, qty };
+  let items = 0, qty = 0, value = 0;
+  for (const t of S.c.transfer_items){ if (t.transfer_id !== id) continue;
+    items++; qty += +t.qty; value += +t.qty * (+t.unit_cost || 0); }
+  return { items, qty, value };
 }
+function trfFiltered(){
+  const f = S.f.trf;
+  return S.c.transfers.filter(t =>
+    (!f.from || (t.date||'') >= f.from) && (!f.to || (t.date||'') <= f.to) &&
+    (!f.loc || t.from_location_id === f.loc || t.to_location_id === f.loc));
+}
+function trfSet(k, val){ S.f.trf[k] = val; pgTransfers(); }
 function pgTransfers(){
-  const rows = S.c.transfers.map(t => { const tt = transferTotals(t.id);
+  const f = S.f.trf ||= { from:'', to:'', loc:'' };
+  const list = trfFiltered();
+  let gUnits = 0, gValue = 0;
+  const rows = list.map(t => { const tt = transferTotals(t.id);
+    gUnits += tt.qty; gValue += tt.value;
     return `<tr><td class="mut">${fmtD(t.date)}</td>
       <td>${esc(nameOf('locations', t.from_location_id))} <span class="mut">→</span> ${esc(nameOf('locations', t.to_location_id))}</td>
       <td class="mut">${esc(nameOf('employees', t.employee_id))}</td>
       <td class="r">${tt.items}</td><td class="r">${NUM(tt.qty)}</td>
+      <td class="r bold">${AED(tt.value)}</td>
       ${rowBtns(viewIB(`viewTransfer('${t.id}')`), delIB(`delTransfer('${t.id}')`))}</tr>`; });
-  page('Transfers', addBtn('New transfer', 'newTransfer()'),
-    tbl(['Date','Route','By',['Lines','r'],['Units','r'],''], rows,
-      { empty:'No transfers yet. Move stock between your locations here.', emptyBtn: addBtn('New transfer','newTransfer()') }));
+  page('Transfers', addBtn('New transfer', 'newTransfer()') + ' ' + ghostBtn('Export PDF', 'trfPDF()', 'doc'), `
+    <div class="fbar">
+      <div><label>From</label><input type="date" value="${f.from}" onchange="trfSet('from', this.value)"></div>
+      <div><label>To</label><input type="date" value="${f.to}" onchange="trfSet('to', this.value)"></div>
+      <div><label>Location</label><select onchange="trfSet('loc', this.value)">${
+        ['<option value="">All locations</option>', ...activeLocs().map(l=>`<option value="${l.id}"${f.loc===l.id?' selected':''}>${esc(l.name)}</option>`)].join('')}</select></div>
+      ${(f.from||f.to||f.loc) ? `<div><label>&nbsp;</label><button class="btn ghost sm" onclick="S.f.trf={from:'',to:'',loc:''};pgTransfers()">Clear filters</button></div>` : ''}
+    </div>
+    <div class="grid g3 mb">
+      ${kpi('Transfers', 'var(--violet)', NUM(list.length), 'in this selection')}
+      ${kpi('Units moved', 'var(--teal)', NUM(gUnits) + ' <span style="font-size:15px">pc</span>', 'total pieces')}
+      ${kpi('Total stock value', 'var(--green)', AED(gValue), 'at batch cost')}
+    </div>
+    ${tbl(['Date','Route','By',['Lines','r'],['Units','r'],['Stock value','r'],''], rows,
+      { empty:'No transfers match these filters.', emptyBtn: addBtn('New transfer','newTransfer()'),
+        foot:`<tr class="tfoot"><td colspan="4" style="text-align:right">Total</td><td class="r">${NUM(gUnits)}</td><td class="r">${AED(gValue)}</td><td></td></tr>` })}`);
+}
+function trfPDF(){
+  const f = S.f.trf, list = trfFiltered();
+  let gUnits = 0, gValue = 0;
+  const body = list.map(t => { const tt = transferTotals(t.id);
+    gUnits += tt.qty; gValue += tt.value;
+    return `<tr><td>${fmtD(t.date)}</td>
+      <td>${esc(nameOf('locations', t.from_location_id))}</td>
+      <td>${esc(nameOf('locations', t.to_location_id))}</td>
+      <td>${esc(nameOf('employees', t.employee_id))}</td>
+      <td style="text-align:right">${tt.items}</td>
+      <td style="text-align:right">${NUM(tt.qty)}</td>
+      <td style="text-align:right">${AED(tt.value)}</td></tr>`; }).join('');
+  const range = (f.from || f.to) ? (fmtD(f.from||'2000-01-01') + ' → ' + fmtD(f.to||todayStr())) : 'All dates';
+  const where = f.loc ? ' · ' + nameOf('locations', f.loc) : '';
+  printReport('Stock Transfer Report', range + where + ' · ' + NUM(list.length) + ' transfers · Total stock value ' + AED(gValue),
+    `<table class="ptbl"><thead><tr><th>Date</th><th>Location from</th><th>Location to</th><th>Moved by</th>
+      <th style="text-align:right">Lines</th><th style="text-align:right">Units</th><th style="text-align:right">Stock value</th></tr></thead>
+      <tbody>${body}</tbody>
+      <tfoot><tr><th colspan="5" style="text-align:right">Total</th><th style="text-align:right">${NUM(gUnits)}</th><th style="text-align:right">${AED(gValue)}</th></tr></tfoot></table>`);
 }
 function trLineHTML(){
   return `<div class="line tr-line">
@@ -1206,7 +1252,8 @@ function viewTransfer(id){
     <td class="r mut">${AED(x.unit_cost)}</td><td class="r">${AED(x.qty*(+x.unit_cost||0))}</td></tr>`; }).join('');
   openModal('Transfer — ' + fmtD(t.date), `
     <div class="mnote">${esc(nameOf('locations',t.from_location_id))} → ${esc(nameOf('locations',t.to_location_id))}${t.notes?'<br>'+esc(t.notes):''}</div>
-    <div class="twrap"><table class="tbl" style="min-width:520px"><thead><tr><th>Product</th><th class="r">Qty</th><th>Expiry breakdown</th><th class="r">Unit cost</th><th class="r">Value</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="twrap"><table class="tbl" style="min-width:520px"><thead><tr><th>Product</th><th class="r">Qty</th><th>Expiry breakdown</th><th class="r">Unit cost</th><th class="r">Value</th></tr></thead>
+    <tbody>${rows}</tbody><tbody class="tfoot"><tr><td colspan="4" style="text-align:right">Total stock value</td><td class="r">${AED(transferTotals(id).value)}</td></tr></tbody></table></div>
     <div style="height:10px"></div>`);
 }
 function delTransfer(id){

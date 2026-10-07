@@ -298,7 +298,7 @@ svg.chart text{font-family:var(--ui);fill:var(--muted)}
     <nav id="nav" aria-label="Main"></nav>
     <div class="sb-foot">
       <button class="nv" onclick="signOut()" id="soBtn"></button>
-      <div style="font-size:11px;color:var(--faint);padding:8px 10px 0">v1.7 · UAE · AED</div>
+      <div style="font-size:11px;color:var(--faint);padding:8px 10px 0">v1.8 · UAE · AED</div>
     </div>
   </aside>
   <div id="scrim" onclick="closeDrawer()"></div>
@@ -403,10 +403,21 @@ const activeLocs = () => (S.c.locations||[]).filter(l => l.is_active !== false);
 const activeProds = () => (S.c.products||[]).filter(p => p.is_active !== false).sort((a,b)=>a.name.localeCompare(b.name));
 
 /* ---------------- data ---------------- */
+/* Supabase caps every response at 1000 rows, so each table is read page by page
+   (ordered by id, otherwise pages can repeat or skip rows). */
+async function fetchAll(table){
+  const PAGE = 1000, out = [];
+  for (let from = 0; from < 500000; from += PAGE){
+    const { data, error } = await sb.from(table).select('*').order('id', { ascending:true }).range(from, from + PAGE - 1);
+    if (error) throw error;
+    if (data && data.length) out.push(...data);
+    if (!data || data.length < PAGE) break;
+  }
+  return out;
+}
 async function loadAll(){
-  const res = await Promise.all(TABLES.map(t => sb.from(t).select('*').limit(10000)));
-  const bad = res.find(r => r.error); if (bad) throw bad.error;
-  TABLES.forEach((t,i) => S.c[t] = res[i].data || []);
+  const res = await Promise.all(TABLES.map(t => fetchAll(t)));
+  TABLES.forEach((t,i) => S.c[t] = res[i] || []);
   const byDate = (a,b) => (b.date||'').localeCompare(a.date||'') || (b.created_at||'').localeCompare(a.created_at||'');
   for (const t of ['purchases','issues','transfers','collections','adjustments','machine_transfers']) S.c[t].sort(byDate);
   S.c.batches.sort((a,b) => ((a.expiry_date||'9999')+'').localeCompare((b.expiry_date||'9999')+''));
@@ -1810,14 +1821,17 @@ function pgSettings(){
       </div></div>
     <div class="card" style="margin-top:16px"><h3>${ic('alert',15)} Data health</h3>
       ${(() => {
+        const emptyIssues = S.c.issues.filter(i => !S.c.issue_items.some(x => x.issue_id === i.id));
         const noPrice = S.c.products.filter(p => p.is_active!==false && !(+p.sale_price > 0));
         const noCost  = S.c.batches.filter(b => +b.qty_remaining > 0 && !(+b.unit_cost > 0));
         const zeroLines = S.c.issue_items.filter(it => !(+it.unit_price > 0) || !(+it.unit_cost > 0));
         const fixable = fixValuesScan().length;
         const line = (n, label, cls) => `<div style="margin:6px 0"><span class="pill ${n? cls : 'p-ok'}">${NUM(n)}</span> <span style="margin-left:6px">${label}</span></div>`;
-        return line(noPrice.length, 'active product(s) with no sale price' + (noPrice.length ? ' — ' + esc(noPrice.slice(0,4).map(p=>p.name).join(', ')) + (noPrice.length>4?'…':'') : ''), 'p-out')
+        return line(emptyIssues.length, 'stock-out(s) with no product lines at all — these cannot be valued, delete and re-enter them', 'p-out')
+             + line(noPrice.length, 'active product(s) with no sale price' + (noPrice.length ? ' — ' + esc(noPrice.slice(0,4).map(p=>p.name).join(', ')) + (noPrice.length>4?'…':'') : ''), 'p-out')
              + line(noCost.length, 'stock batch(es) received with no cost', 'p-low')
-             + line(zeroLines.length, 'stock-out line(s) showing AED 0', 'p-out');
+             + line(zeroLines.length, 'stock-out line(s) showing AED 0', 'p-out')
+             + `<div class="mut" style="font-size:12.5px;margin-top:10px">Loaded from the database: ${NUM(S.c.issues.length)} stock-outs · ${NUM(S.c.issue_items.length)} lines · ${NUM(S.c.batches.length)} batches</div>`;
       })()}
       <div class="mut" style="font-size:13px;line-height:1.7;margin:10px 0 14px">
         Fix the product prices first (Products → ✏️), then run the repair below — it refills the value of old
